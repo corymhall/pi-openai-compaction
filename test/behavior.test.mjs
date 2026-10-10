@@ -1223,6 +1223,29 @@ test('user retention and request fitting preserve boundaries and opaque content'
   ).toStrictEqual([opaqueMetadata]);
 });
 
+test('request fitting counts serialized tool schemas including optional property names', () => {
+  const tools = [
+    {
+      type: 'function',
+      name: 'declaration_heavy',
+      parameters: {
+        type: 'object',
+        properties: Object.fromEntries(
+          Array.from({ length: 1000 }, (_, i) => [
+            `optional_parameter_${i}_${'x'.repeat(30)}`,
+            { type: 'string' },
+          ]),
+        ),
+      },
+    },
+  ];
+  const bytes = Buffer.byteLength(JSON.stringify(tools));
+  expect(bytes).toBeGreaterThan(4096 * 4);
+  expect(bytes).toBeLessThan(20 * 1024 * 1024);
+  expect(() => fitRequest({ tools }, [], 4096)).toThrow('estimated model budget');
+  expect(fitRequest({ tools }, [], Math.ceil(bytes / 4) + 100)).toStrictEqual([]);
+});
+
 test('deadlines, cancelled promises and unsupported connections fail safely', async () => {
   let attempts = 0;
   const abortController = new AbortController();

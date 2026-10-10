@@ -56,4 +56,8 @@ npm pack --dry-run     # builds and checks package contents; does not publish
 
 Use `npm test` for tests alone, `npm run test:watch` while developing, `npm run test:coverage` for source coverage, and `npm run format` to apply formatting. Tests run directly against source; a build is not required first.
 
-`test/behavior.test.mjs` uses the real Pi session lifecycle and actual Codex serializer/SSE adapter against a local server with synthetic credentials. Cases reset their session/server state independently. No paid inference is required. `test/request-state.test.mjs` records the distinction between normal and synthetic request preparation; it is not a backend compatibility test. Both use Vitest directly, without a subprocess wrapper. Earlier `docs/feasibility/` scripts remain historical experiments, not part of the regression suite.
+`test/behavior.test.mjs` uses the real Pi session lifecycle and actual Codex serializer/SSE adapter against a local server with synthetic credentials. Cases reset their session/server state independently. No paid inference is required. `test/request-state.test.mjs` records the distinction between normal and synthetic request preparation; it is not a backend compatibility test. Both use Vitest directly, without a subprocess wrapper.
+
+## Maintaining this project
+
+See [maintainer documentation](docs/README.md) for architecture, upstream sources, review guidance, and testing/acceptance procedures.

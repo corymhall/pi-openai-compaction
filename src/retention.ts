@@ -134,9 +134,16 @@ function estimatedTokens(value: unknown): number {
   if (record(value)) {
     if (value.type === 'input_image') return Math.ceil(7373 / 4);
     if (value.type === 'compaction') return 0; // the entire checkpoint is opaque, including extra fields
+    // Tool declarations include model-visible schema keys and JSON structure.
     // Ciphertext is opaque; exclude its bytes from the heuristic rather than claiming its size.
     return Object.entries(value).reduce(
-      (n, [key, v]) => n + (key === 'encrypted_content' ? 0 : estimatedTokens(v)),
+      (n, [key, v]) =>
+        n +
+        (key === 'encrypted_content'
+          ? 0
+          : key === 'tools'
+            ? textTokens(JSON.stringify(v))
+            : estimatedTokens(v)),
       0,
     );
   }
