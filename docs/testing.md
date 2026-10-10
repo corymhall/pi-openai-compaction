@@ -34,14 +34,17 @@ Tests execute directly against source with synthetic credentials and temporary s
 
 Essential regressions include:
 
-- First compaction, continuation, repeated compaction, immediate reopen and fork continuation.
+- First/repeated dual compactions with distinguishable summaries, independent previous portable summary/prepared prefix, combined usage and cumulative hook file lists.
+- Empty/whitespace individual text responses despite file tags, split-turn history/prefix responses (including previous-summary-only history), length/error/tool output rejection, previous checkpoint preservation and sibling abort.
+- Reopen without loading the extension, continue, native compact and re-enable without replaying superseded state; fork continuation.
+- Explicit portable mode on identity mismatch with corrupt-state rejection and conservative tree-summary blocking.
 - Ordered repeated actual users versus custom/shell/summary wire users; exact checkpoint identity/position and absence of every display marker from outgoing history.
 - Complete live tail, paired tool IDs, encrypted reasoning, removed grammar-tool declarations, prepared hidden tools and current forced instructions.
 - Image blocking initially and after policy changes/reopen, including tool results and prior retained windows; ciphertext carried unchanged.
 - User-retention boundaries, Unicode, atomic image/labels and no older-user backfill; restricted fitting and independent wire-byte guard.
 - Invalid/unsupported details, missing/duplicate anchors, sealed edits, valid live-tail edits, model/account/endpoint mismatch and conservative tree-summary rejection.
 - Raw completed/minimal terminal shapes, incomplete/error/EOF/HTTP failures, invalid checkpoint counts/content, operation isolation and nonexecution of synthetic tools.
-- One attempt, no native text fallback, parent cancellation, auth/stream deadlines and late rejection observation.
+- One attempt per path (Pi split-turn may use two text calls), no partial success/fallback, both-direction failures and sibling connection closure, parent cancellation, auth/stream deadlines and late rejection observation.
 - Usage mapping, normal automatic threshold/overflow recovery and no ineffective immediate compaction loop.
 - Host append failure reporting without treating in-memory state as disk durability.
 - Source-factory discovery/session binding in print/TUI modes and built package content. Module loading is not visual TUI acceptance.
@@ -54,7 +57,19 @@ Run the suite against the proposed aligned Pi baseline. Inspect the actual host 
 
 ## Authorized live acceptance
 
-Live backend acceptance of the current implementation is still pending. Local success cannot prove server acceptance of declarations, encrypted recursion or WebSocket continuity.
+An authorized run on 2026-10-10 passed using Pi 1.1.0 and legacy `openai-codex` / `openai-codex-responses` OAuth with `gpt-6.1-sol`. It used disposable forks of a real implementation session with roughly 166k reported context tokens; the original session's file hash remained unchanged.
+
+Observed results:
+
+- Initial dual compaction persisted one encrypted checkpoint and a nonempty ordinary Pi summary (about 89 seconds).
+- Separate fresh processes resumed the saved checkpoint with the plugin enabled and absent. With tools disabled, both answered seven implementation-recall questions correctly, including the summary-validation defect and its fix.
+- Recursive dual compaction succeeded (about 44 seconds). Both encrypted and plugin-free forks recalled newly introduced test facts and earlier implementation decisions. Request metadata confirmed one encrypted item on the enabled path and none on the plugin-free path.
+- Native Pi compaction with the plugin absent succeeded. Re-enabling the plugin afterward continued from the newer text summary without replaying old encrypted state.
+- Cached WebSocket continuation succeeded before and after another dual compaction (about 41 seconds). Provider debug counters showed three requests, one connection created, two reuses, one delta request, two full-context requests, zero WebSocket failures and zero SSE fallbacks. Post-compaction recall remained correct.
+
+The first compaction used Pi's normal retained-tail budget. Pi correctly refused immediate repeated compaction when there was too little new history; later test-only in-memory budgets of 2,048 and 128 retained tokens exercised recursion and cached-connection transitions without manufacturing a large conversation. No global settings were changed. Private session copies, ciphertext and answers were kept outside the repository; no live captures are test fixtures.
+
+This establishes acceptance for the tested model/account, transcript and transports, not exhaustive summary fidelity, all declarations, other models/accounts, automatic threshold recovery against the live backend, or crash durability. Recall calls declared no tools and executed none. Local regressions still own failure/cancellation and scheduler coverage; repeat authorized acceptance when protocol or compatibility changes.
 
 Ask the user before any real inference, including subscription-backed requests. Use a disposable session/project and Pi's supported legacy login; do not read auth files, print tokens or alter global settings. Agree on the producing model, request budget and transport coverage beforehand.
 

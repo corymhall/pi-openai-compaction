@@ -192,6 +192,7 @@ export function mapUsage(raw: unknown): Usage | undefined {
 }
 export interface Deadline {
   signal: AbortSignal;
+  abort(reason: unknown): void;
   dispose(): void;
   race<T>(promise: Promise<T>): Promise<T>;
 }
@@ -210,6 +211,9 @@ export function deadline(parent: AbortSignal, ms: number): Deadline {
   );
   return {
     signal: controller.signal,
+    abort(reason) {
+      controller.abort(reason);
+    },
     dispose() {
       clearTimeout(timer);
       parent.removeEventListener('abort', abort);

@@ -4,6 +4,7 @@ import {
   assertIdentity,
   CompactionError,
   coverageFor,
+  digest,
   fail,
   newAnchor,
   ownsCheckpoint,
@@ -31,6 +32,8 @@ import {
   supportedModel,
 } from './transport.js';
 
+import { combinedUsage, portableCompact } from './portable.js';
+
 // Unvalidated initial default, configurable per invocation; not measured live acceptance.
 export const DEFAULT_DEADLINE_MS = 5 * 60_000;
 function report(ctx: ExtensionContext, error: unknown): void {
@@ -56,6 +59,13 @@ export default function (pi: ExtensionAPI): void {
 
 // Dependency injection is for local behavioral tests, not a configurable auth route.
 export function install(pi: ExtensionAPI, connectionResolver = resolveConnection): void {
+  pi.registerFlag('openai-compaction-portable', {
+    description:
+      'Explicitly use ordinary Pi text history and compaction (still validates owned state)',
+    type: 'boolean',
+    default: false,
+  });
+  const portableMode = () => pi.getFlag('openai-compaction-portable') === true;
   pi.registerFlag('openai-compaction-deadline-ms', {
     description:
       'Whole-operation remote compaction deadline (1000–1800000 ms; initial default 300000)',
@@ -84,6 +94,7 @@ export function install(pi: ExtensionAPI, connectionResolver = resolveConnection
         fail('This encrypted checkpoint requires its legacy Codex producing model.');
       }
       const projection = ctx.sessionManager.buildSessionProjection();
+      const portable = portableMode();
       const sources = effectiveSources(projection, checkpoint);
       const instructions = ctx.getSystemPrompt();
       const reasoning = pi.getThinkingLevel();
@@ -99,44 +110,59 @@ export function install(pi: ExtensionAPI, connectionResolver = resolveConnection
       // mapping; override only this operation's current instructions in onPayload.
       const messages = filterContext(projection.messages, projection, checkpoint);
       const active = operation;
-      const result = await active.race(
-        (async () => {
-          const connection = await connectionResolver(ctx, active.signal);
-          return requestV2(
-            connection,
-            { messages: convertWithImagePolicy(messages, blockImages) },
-            {
-              signal: active.signal,
-              reasoning: reasoning === 'off' ? undefined : reasoning,
-              sessionId: ctx.sessionManager.getSessionId(),
-            },
-            (body) => {
-              if (blockImages !== (pi.getSettings().images?.blockImages ?? false)) {
-                fail('Image policy changed during compaction; request discarded.');
-              }
-              body.instructions = instructions;
-              const classified = expandClassified(
-                classifyWire(body.input as Record<string, unknown>[], sources, blockImages),
-                checkpoint,
-                blockImages,
-              );
-              const { input: _input, service_tier: _tier, ...request } = body;
-              return fitRequest(
-                { ...request, instructions },
-                classified,
-                connection.model.contextWindow,
-              );
-            },
-            checkpoint.kind === 'valid' ? checkpoint.details.identity : undefined,
-          ).then((response) => ({
-            ...response,
-            identity: connection.identity,
-          }));
-        })(),
+      const connection = await active.race(connectionResolver(ctx, active.signal));
+      if (!portable && checkpoint.kind === 'valid')
+        assertIdentity(connection.identity, checkpoint.details.identity);
+      const textTask = portableCompact(
+        event.preparation,
+        branch,
+        connection,
+        active.signal,
+        reasoning,
+        ctx.sessionManager.getSessionId(),
+      );
+      // Keep synchronous serialization failures inside the observed sibling promise.
+      const encryptedTask = portable
+        ? Promise.resolve(undefined)
+        : (async () => {
+            return requestV2(
+              connection,
+              { messages: convertWithImagePolicy(messages, blockImages) },
+              {
+                signal: active.signal,
+                reasoning: reasoning === 'off' ? undefined : reasoning,
+                sessionId: ctx.sessionManager.getSessionId(),
+              },
+              (body) => {
+                if (blockImages !== (pi.getSettings().images?.blockImages ?? false)) {
+                  fail('Image policy changed during compaction; request discarded.');
+                }
+                body.instructions = instructions;
+                const classified = expandClassified(
+                  classifyWire(body.input as Record<string, unknown>[], sources, blockImages),
+                  checkpoint,
+                  blockImages,
+                );
+                const { input: _input, service_tier: _tier, ...request } = body;
+                return fitRequest(
+                  { ...request, instructions },
+                  classified,
+                  connection.model.contextWindow,
+                );
+              },
+              checkpoint.kind === 'valid' ? checkpoint.details.identity : undefined,
+            );
+          })();
+      // Promise.all observes both promises; abort the sibling on any rejection.
+      const [text, result] = await active.race(
+        Promise.all([textTask, encryptedTask]).catch((error) => {
+          active.abort(error);
+          throw error;
+        }),
       );
       assertIdentity(
         (await active.race(connectionResolver(ctx, active.signal))).identity,
-        result.identity,
+        connection.identity,
       );
       active.signal.throwIfAborted();
       if (
@@ -151,12 +177,18 @@ export function install(pi: ExtensionAPI, connectionResolver = resolveConnection
       ) {
         fail('Session or request state changed during compaction; checkpoint discarded.');
       }
+      if (portable) return { compaction: text };
+      if (!result) fail('Encrypted operation did not complete.');
       const anchor = newAnchor();
       const details: Checkpoint = {
         type: TYPE,
-        version: 1,
+        version: 2,
         anchor,
-        identity: result.identity,
+        summaryHash: digest(text.summary),
+        firstKeptEntryId: text.firstKeptEntryId,
+        readFiles: text.details?.readFiles ?? [],
+        modifiedFiles: text.details?.modifiedFiles ?? [],
+        identity: connection.identity,
         coveredThrough,
         coverage,
         window: [
@@ -171,14 +203,15 @@ export function install(pi: ExtensionAPI, connectionResolver = resolveConnection
       };
       return {
         compaction: {
-          summary: anchor,
-          firstKeptEntryId: event.preparation.firstKeptEntryId,
+          summary: text.summary,
+          firstKeptEntryId: text.firstKeptEntryId,
           tokensBefore: event.preparation.tokensBefore,
           details,
-          usage: result.usage,
+          usage: combinedUsage(text.usage, result.usage),
         },
       };
     } catch (error) {
+      operation?.abort(error);
       report(ctx, error);
       return { cancel: true };
     } finally {
@@ -192,7 +225,7 @@ export function install(pi: ExtensionAPI, connectionResolver = resolveConnection
   pi.on('context_with_system', async (event, ctx) => {
     try {
       const checkpoint = requireCheckpoint(ctx.sessionManager.getBranch());
-      if (checkpoint.kind === 'absent') return undefined;
+      if (checkpoint.kind === 'absent' || portableMode()) return undefined;
       const connection = await connectionResolver(ctx, ctx.signal);
       assertIdentity(connection.identity, checkpoint.details.identity);
       return {
@@ -212,7 +245,7 @@ export function install(pi: ExtensionAPI, connectionResolver = resolveConnection
   pi.on('before_provider_headers', (event, ctx) => {
     try {
       const checkpoint = requireCheckpoint(ctx.sessionManager.getBranch());
-      if (checkpoint.kind === 'absent' && !supportedModel(ctx.model)) return;
+      if (portableMode() || (checkpoint.kind === 'absent' && !supportedModel(ctx.model))) return;
       // Cached WS connections retain their handshake headers: advertise before first compaction.
       const merged = betaHeaders({ ...ctx.model?.headers, ...event.headers });
       for (const key of Object.keys(event.headers)) {
@@ -231,7 +264,7 @@ export function install(pi: ExtensionAPI, connectionResolver = resolveConnection
   pi.on('before_provider_request', async (event, ctx) => {
     try {
       const checkpoint = requireCheckpoint(ctx.sessionManager.getBranch());
-      if (checkpoint.kind === 'absent') return undefined;
+      if (checkpoint.kind === 'absent' || portableMode()) return undefined;
       const connection = await connectionResolver(ctx, ctx.signal);
       assertIdentity(connection.identity, checkpoint.details.identity);
       if (

@@ -1,6 +1,6 @@
 # pi-openai-compaction
 
-Remote whole-window V2 compaction for Pi's **legacy `openai-codex` / `openai-codex-responses` ChatGPT login**. Requires the Pi 1.1.0 API baseline; local development uses exactly 1.1.0. Backend acceptance is still pending; local tests are not live acceptance.
+Dual portable-text and remote whole-window V2 compaction for Pi's **legacy `openai-codex` / `openai-codex-responses` ChatGPT login**. Requires the Pi 1.1.0 API baseline; local development uses exactly 1.1.0. Live acceptance passed on that baseline with legacy `gpt-6.1-sol`; see [tested scope and limitations](docs/testing.md#authorized-live-acceptance).
 
 Try without changing settings:
 
@@ -8,9 +8,11 @@ Try without changing settings:
 pi -e /path/to/pi-openai-compaction
 ```
 
-Use Pi's ordinary `/compact` and automatic scheduling. Nonempty custom `/compact` guidance is rejected before sending: V2 uses current instructions. API keys, the new OpenAI login, Azure, custom endpoints and gateways are unsupported. No native text-summary fallback or automatic remote compaction retries are installed.
+Use Pi's ordinary `/compact` and automatic scheduling. Nonempty custom `/compact` guidance is rejected before sending: V2 uses current instructions. API keys, the new OpenAI login, Azure, custom endpoints and gateways are unsupported. No automatic text-only fallback on compaction failure or automatic remote compaction retries are installed; uninstall portability and explicit portable mode are intentional text paths.
 
-Synthetic compaction is a separate SSE operation using Pi's actual Codex history serializer, current instructions, current transcript tool declarations and reasoning. It does not dispatch normal-inference Fast-mode hooks or use cached payload options. Whether these operation-specific declarations work with the legacy backend still needs live acceptance. Ordinary continuation retains Pi's prepared prompt, tools, service tier and transport.
+Each compaction runs Pi's exported native text summarizer and whole-window encrypted compaction concurrently on the same resolved legacy connection. Both must succeed before one entry is returned; either failure aborts the sibling, with no partial success or retry. Usage combines both operations (including Pi split-turn calls). Text summarization uses Pi's prepared prefix, normal retained-tail boundary and previous portable summary, independently of encrypted replay; normal text/image fidelity limitations apply.
+
+Synthetic encrypted compaction is a separate SSE operation using Pi's actual Codex history serializer, current instructions, current transcript tool declarations and reasoning. It does not dispatch normal-inference Fast-mode hooks or use cached payload options. Live acceptance covered a real implementation transcript and recursive checkpoints on the tested legacy connection; it does not establish compatibility for every tool declaration or model. Ordinary continuation retains Pi's prepared prompt, tools, service tier and transport.
 
 ## Checkpoints and recovery
 
@@ -22,7 +24,11 @@ Pi's effective `images.blockImages` setting applies to synthetic input (includin
 
 A checkpoint may be consumed only by its producing model and compatible legacy account/endpoint. Reopening and forks resolve inherited branch evidence. Edits to sealed history, malformed/unsupported checkpoints, missing anchors and unsafe text tree summaries are rejected; edits confined to the live tail remain supported. The old standalone prototype format is not migrated.
 
-To recover, navigate **before the affected checkpoint**, or start a new session. If the extension was unloaded, re-enable it before continuing. Disabling it does not turn encrypted history into a readable summary; an unloaded extension cannot prevent requests. The persisted display warning is not portable conversation history.
+Every accepted entry also stores a real ordinary Pi text summary and its normal `firstKeptEntryId`. With the extension completely absent, Pi naturally resumes that summary plus its retained tail and can compact again. Re-enabling after a newer ordinary compaction uses that new text lineage, not stale encrypted state.
+
+For an explicit text-only invocation use `pi -e /path/to/pi-openai-compaction --openai-compaction-portable`. This intentionally bypasses producing-model/account identity for continuation, but still validates owned state and rejects corruption/unsupported versions. Compaction in this mode uses only Pi's text helper and supersedes encrypted state; it remains limited to the supported legacy connection and rejects custom guidance. It is not an automatic fallback. Text tree summaries across owned checkpoints remain conservatively blocked in either mode.
+
+For invalid/corrupt owned state, navigate **before the affected checkpoint**, or start a new session. Earlier checkpoint/prototype versions are rejected without migration.
 
 **Autoresearch is unsupported.** Use a separate session with this extension disabled and no inherited opaque checkpoint. There is no autoresearch mode integration.
 
@@ -35,13 +41,13 @@ To recover, navigate **before the affected checkpoint**, or start a new session.
 - Request fitting rewrites only eligible trailing tool outputs, stopping at the first noneligible/encrypted boundary. Oversized user input/checkpoints are never truncated to force a request.
 - The local 20 MiB wire-byte safety guard is not a measured backend limit. Image budgeting uses Codex's approximate auto-detail estimate, not base64 length.
 - Covered-history pruning uses `context_with_system` to preserve the leading prompt and historical tool/system deltas. Pi's own later prepared-declaration and forced-prompt projections remain in control. Arbitrary request-time history-transform/redaction extensions are unsupported; mismatched source correspondence is rejected.
-- Synthetic compaction has one application attempt, retries disabled, and a whole-operation deadline. The initial **five-minute default is unvalidated**, not measured acceptance. Override per invocation:
+- Both compaction paths have retries disabled and share one whole-operation deadline. Pi can make separate history and split-turn text calls. The initial **five-minute default is unvalidated**, not measured acceptance. Override per invocation:
 
   ```sh
   pi -e /path/to/pi-openai-compaction --openai-compaction-deadline-ms 600000
   ```
 
-Usage records subtract cached input from ordinary input and keep reasoning within output. Cost fields remain zero/unpriced, not a claim that an operation is free. Extension diagnostics omit credentials and checkpoint bodies.
+Usage records subtract cached input from ordinary input and keep reasoning within output. Encrypted-call cost fields are zero/unpriced, not a claim that an operation is free; native text usage retains Pi's cost calculation. Extension diagnostics omit credentials and checkpoint bodies.
 
 ## Local validation
 

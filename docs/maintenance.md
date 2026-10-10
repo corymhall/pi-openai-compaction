@@ -11,17 +11,17 @@ Development pins all three Pi packages to the same version (currently 1.1.0). Up
 ## Decisions to preserve
 
 - Personal-use legacy ChatGPT/Codex connection only; no API-key/new-login/Azure/gateway adapters.
-- Whole-window Codex V2 and source-aware retention, not default older-prefix summarization.
+- Whole-window Codex V2 and source-aware retention alongside an independent ordinary Pi prefix summary.
 - One synthetic SSE attempt with a full-operation deadline, not ordinary transport retries or Fast-mode hook dispatch.
 - Supported Pi APIs, no private runner monkeypatching or provider replacement.
-- No text fallback, automatic checkpoint conversion or silent migration.
+- No automatic text-only fallback on failure, automatic checkpoint conversion or silent migration. Uninstall portability and explicit portable mode intentionally use text.
 - Producing-model/account/endpoint identity and transitive branch coverage guard replay.
 - Saved wire copies remain authoritative after truncation/filtering; never reload their content from sealed raw entries.
 - Full-transcript pruning preserves tool history; normal request preparation remains Pi-owned.
 - Autoresearch/arbitrary history-transform compatibility is outside scope.
 - Host cancellation/write risks and unknown encrypted-context estimates are disclosed limitations, not reasons to invent fake usage or a mandatory host fork.
 
-Portability/dual compaction has been discussed but is not part of the implementation. Before adding it, review full-window portable-summary production, recursion, failure policy, `firstKeptEntryId`, replay anchor changes, disabled-extension resume and migration. Do not turn the current warning anchor into a pretend summary.
+Dual compaction requires both operations to succeed on one resolved connection before returning one entry. Text uses exported Pi compact() and event preparation, with cumulative hook file lists carried explicitly; it must never pass through replay hooks. Keep its Pi boundary independent of encrypted coverage. Uninstall and explicit portable mode use real text; portable mode still rejects invalid owned state. Earlier versions are rejected; no migration/backfill is needed.
 
 ## Review checklist
 
@@ -49,7 +49,8 @@ Use concrete payload/session evidence for findings. Existing passing tests estab
 - Require both raw protocol completion and normalized success; never execute synthetic tools.
 - Check HTTP failure, EOF, malformed results, cancellation during auth/streaming and late rejection handling.
 - Verify one attempt, no concealed fallback/retry, whole-operation deadline and cleanup.
-- Preserve current checkpoint on remote failure; don't let reporting/preparation exceptions trigger native summary fallback.
+- Validate each individual text completion before Pi decorates file lists or merges split-turn summaries; empty/whitespace, partial, failed or tool-calling output cannot become portable context.
+- Abort sibling operations on either failure and observe late errors. Preserve current checkpoint on failure; don't let reporting/preparation exceptions trigger native summary fallback.
 - Treat append failure as memory/disk divergence, not durable success.
 - Keep fitting restricted to eligible outputs and bound wire bytes without estimating opaque context from ciphertext.
 - Validate usage subtotals and avoid fabricated pricing.

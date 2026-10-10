@@ -9,4 +9,4 @@ Start with the [project README](../README.md) for installation, supported connec
 | [Maintenance and review](maintenance.md) | Make changes, review safety-sensitive behavior and assess compatibility changes.                    |
 | [Testing](testing.md)                    | Run local checks, add meaningful regressions and plan authorized live acceptance.                   |
 
-These documents describe the current implementation, not experiment history. Keep them synchronized with code. Current backend acceptance is still unverified: local tests exercise the actual Pi runtime against synthetic local responses, not OpenAI's backend.
+These documents describe the current implementation, not experiment history. Keep them synchronized with code. Local tests exercise the actual Pi runtime against synthetic local responses. A separate authorized backend run passed for the connection and scenarios recorded in [Testing](testing.md#authorized-live-acceptance); that result is not blanket compatibility assurance.

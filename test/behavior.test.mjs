@@ -61,6 +61,12 @@ const sockets = new Set();
 let compactions = 0;
 let wireMode = 'good';
 let onSyntheticReceived;
+let textMode = 'good';
+const textModes = [];
+const textSummaries = [];
+const preparations = [];
+let portable = false;
+const isText = (body) => body.instructions?.includes('context summarization assistant');
 
 let identityOverrides = {};
 const connection = async (ctx) => {
@@ -93,23 +99,50 @@ beforeEach(async () => {
     phaseSnapshots.length =
       0;
   compactions = toolRuns = 0;
-  wireMode = 'good';
+  textModes.length = textSummaries.length = preparations.length = 0;
+  wireMode = textMode = 'good';
+  portable = false;
   deadlineMs = '300000';
   identityOverrides = {};
   customFailure = transientText = onSyntheticReceived = undefined;
   forcePrompt = true;
   server = createServer(async (req, res) => {
+    // Native Pi summaries may probe automatic WebSocket transport before SSE.
+    if (req.method !== 'POST') {
+      res.writeHead(400);
+      res.end();
+      return;
+    }
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     const raw = Buffer.concat(chunks);
     const body = JSON.parse(
       (req.headers['content-encoding'] === 'zstd' ? zstdDecompressSync(raw) : raw).toString('utf8'),
     );
-    requests.push({ body, headers: req.headers });
+    const closed = new Promise((resolve) => res.once('close', resolve));
+    requests.push({ body, headers: req.headers, closed });
     const synthetic = body.input.at(-1)?.type === 'compaction_trigger';
+    const text = isText(body);
+    const mode = text ? (textModes.shift() ?? textMode) : undefined;
+    const completionText = text
+      ? mode === 'whitespace'
+        ? ' \n\t '
+        : (textSummaries.shift() ?? 'local reply')
+      : 'local reply';
     const reply = synthetic
       ? { checkpoint: 'sealed-' + ++compactions, tokens: 200 }
-      : responses.shift();
+      : text
+        ? { tokens: 100 }
+        : responses.shift();
+    if (text && mode === 'stall') {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      return;
+    }
+    if (text && mode === 'error') {
+      res.writeHead(400);
+      res.end('text failure');
+      return;
+    }
     expect(reply, 'missing staged normal response').toBeTruthy();
     if (synthetic && wireMode === 'http-error') {
       res.writeHead(503, { 'content-type': 'application/json' });
@@ -149,7 +182,7 @@ beforeEach(async () => {
           encrypted_content: reply.checkpoint,
           opaque_extra: { preserve: true },
         }
-      : reply.tool
+      : reply.tool || (text && mode === 'tool')
         ? {
             type: 'function_call',
             id: 'fc_' + requests.length,
@@ -161,7 +194,10 @@ beforeEach(async () => {
             type: 'message',
             id: 'msg_' + requests.length,
             role: 'assistant',
-            content: [{ type: 'output_text', text: 'local reply', annotations: [] }],
+            content:
+              text && mode === 'empty'
+                ? []
+                : [{ type: 'output_text', text: completionText, annotations: [] }],
             status: 'completed',
           };
     if (synthetic && wireMode === 'good') {
@@ -181,12 +217,12 @@ beforeEach(async () => {
     }
     if (!synthetic) {
       send({ type: 'response.output_item.added', output_index: 0, item });
-      if (!reply.tool)
+      if (!reply.tool && !(text && ['empty', 'tool'].includes(mode)))
         send({
           type: 'response.output_text.delta',
           output_index: 0,
           content_index: 0,
-          delta: 'local reply',
+          delta: completionText,
         });
     }
     send({
@@ -201,14 +237,23 @@ beforeEach(async () => {
         item: { ...item, id: 'duplicate' },
       });
     send({
-      type: synthetic && wireMode === 'incomplete' ? 'response.incomplete' : 'response.completed',
+      type:
+        (synthetic && wireMode === 'incomplete') || (text && mode === 'length')
+          ? 'response.incomplete'
+          : 'response.completed',
       response: {
         id,
         // The pinned Codex SSE parser accepts completed terminals without status metadata.
         ...(synthetic && wireMode === 'good'
           ? {}
           : {
-              status: synthetic && wireMode === 'incomplete' ? 'incomplete' : 'completed',
+              status:
+                (synthetic && wireMode === 'incomplete') || (text && mode === 'length')
+                  ? 'incomplete'
+                  : 'completed',
+              ...(text && mode === 'length'
+                ? { incomplete_details: { reason: 'max_output_tokens' } }
+                : {}),
             }),
         output: [item],
         usage: {
@@ -320,12 +365,20 @@ function extension(pi) {
           ],
         },
   );
+  pi.on('session_before_compact', (event) => {
+    preparations.push(structuredClone(event.preparation));
+  });
   install(pi, (ctx) =>
     customFailure ? Promise.reject(Error('SECRET SHOULD NOT BE LOGGED')) : connection(ctx),
   );
   // Fixture-only flag accessor: the normal runtime flag remains unchanged.
   const actualGet = pi.getFlag;
-  pi.getFlag = (name) => (name === 'openai-compaction-deadline-ms' ? deadlineMs : actualGet(name));
+  pi.getFlag = (name) =>
+    name === 'openai-compaction-portable'
+      ? portable
+      : name === 'openai-compaction-deadline-ms'
+        ? deadlineMs
+        : actualGet(name);
   pi.on('context_with_system', (event) => {
     if (!forcePrompt) phaseSnapshots.push(structuredClone(event.messages));
   });
@@ -347,7 +400,7 @@ function extension(pi) {
     rawObserved.push(event.data);
   });
 }
-async function open(manager) {
+async function open(manager, enabled = true) {
   const loader = new DefaultResourceLoader({
     cwd: root,
     agentDir: root,
@@ -358,7 +411,7 @@ async function open(manager) {
     noThemes: true,
     noContextFiles: true,
     systemPrompt: 'base instructions',
-    extensionFactories: [extension],
+    extensionFactories: enabled ? [extension] : [],
     disabledBuiltinExtensions: ['mcp', 'codemode', 'tool-search'],
   });
   await loader.reload();
@@ -371,7 +424,7 @@ async function open(manager) {
     settingsManager: settings,
     sessionManager: manager,
     resourceLoader: loader,
-    tools: ['probe', 'orchestrator'],
+    tools: enabled ? ['probe', 'orchestrator'] : [],
   });
   expect(created.extensionsResult.errors).toStrictEqual([]);
   await created.session.bindExtensions({
@@ -391,7 +444,9 @@ function users(body) {
     .map((x) => x.content.map((p) => p.text ?? '[image]').join(''));
 }
 function normalRequests() {
-  return requests.filter((r) => r.body.input.at(-1)?.type !== 'compaction_trigger');
+  return requests.filter(
+    (r) => r.body.input.at(-1)?.type !== 'compaction_trigger' && !isText(r.body),
+  );
 }
 function syntheticRequests() {
   return requests.filter((r) => r.body.input.at(-1)?.type === 'compaction_trigger');
@@ -699,10 +754,18 @@ test('recursive windows, provenance, reopen, forks, edits and persistence failur
   const validBranch = structuredClone(reopened.getBranch());
   for (const mutate of [
     (b) => {
-      b.at(-1).details.version = 2;
+      b.at(-1).details.version = 1;
     },
     (b) => {
       b.at(-1).summary = 'wrong anchor';
+    },
+    (b) => {
+      b.at(-1).firstKeptEntryId = undefined;
+      b.at(-1).details.firstKeptEntryId = undefined;
+    },
+    (b) => {
+      b.at(-1).firstKeptEntryId = 'missing-boundary';
+      b.at(-1).details.firstKeptEntryId = 'missing-boundary';
     },
     (b) => {
       b.at(-1).details.coverage[0].hash = 'changed';
@@ -826,7 +889,7 @@ test('wire failures, cancellation and oversized input never install a checkpoint
     wireMode = mode;
     const count = requests.length;
     await expect(session.compact()).rejects.toThrow();
-    expect(requests.length, 'one application attempt and no native fallback').toBe(count + 1);
+    expect(requests.length, 'one attempt per representation and no fallback').toBe(count + 2);
     expect(resolveCheckpoint(session.sessionManager.getBranch()).kind).toBe('absent');
     expect(outcomes.at(-1).result).toBe(undefined);
     expect(outcomes.at(-1).aborted).toBe(true);
@@ -837,7 +900,7 @@ test('wire failures, cancellation and oversized input never install a checkpoint
     deadlineStart = Date.now();
   await expect(session.compact()).rejects.toThrow();
   expect(Date.now() - deadlineStart < 3000).toBeTruthy();
-  expect(requests.length).toBe(beforeDeadline + 1);
+  expect(requests.length).toBe(beforeDeadline + 2);
   expect(resolveCheckpoint(session.sessionManager.getBranch()).kind).toBe('absent');
   deadlineMs = '300000';
   let observed;
@@ -858,12 +921,297 @@ test('wire failures, cancellation and oversized input never install a checkpoint
     content: 'x'.repeat(50000),
     timestamp: Date.now(),
   });
-  const beforeOversize = requests.length;
+  const beforeOversize = syntheticRequests().length;
   await expect(session.compact()).rejects.toThrow();
-  expect(requests.length).toBe(beforeOversize);
+  expect(syntheticRequests().length).toBe(beforeOversize);
   expect(session.sessionManager.getBranch().at(-1).message.content.length).toBe(50000);
   session.dispose();
   session = undefined;
+});
+
+test('dual text lineage survives uninstall, native compaction, reenable and forks', async () => {
+  const manager = SessionManager.create(root, join(root, 'portable-lineage'));
+  session = await open(manager);
+  responses.push({ tokens: 300 }, { tokens: 400 });
+  await session.prompt('original constraint');
+  await session.prompt('retained tail');
+  textSummaries.push('PORTABLE SUMMARY ONE');
+  await session.compact();
+  const first = resolveCheckpoint(manager.getBranch());
+  expect(first.kind).toBe('valid');
+  expect(first.entry.summary).toBe('PORTABLE SUMMARY ONE');
+  expect(first.entry.usage.totalTokens).toBe(300);
+  expect(first.entry.firstKeptEntryId).toBe(first.details.firstKeptEntryId);
+  const initialText = requests.filter((r) => isText(r.body));
+  expect(initialText).toHaveLength(1);
+  expect(JSON.stringify(initialText[0].body)).toContain('original constraint');
+  expect(initialText[0].body.service_tier).toBeUndefined();
+  responses.push({ tokens: 500 });
+  await session.prompt(anchorText(first.entry.summary));
+  const identical = normalRequests().at(-1).body;
+  expect(users(identical).at(-1)).toBe(anchorText(first.entry.summary));
+  expect(identical.input.filter((i) => i.type === 'compaction')).toHaveLength(1);
+  textSummaries.push('PORTABLE SUMMARY TWO');
+  await session.compact();
+  const textInputs = requests.filter((r) => isText(r.body)).slice(1);
+  expect(textInputs.length).toBeGreaterThan(0);
+  for (const r of textInputs) {
+    expect(JSON.stringify(r.body)).not.toContain('sealed-');
+    expect(JSON.stringify(r.body)).not.toContain('pi-openai-compaction replay');
+    expect(JSON.stringify(r.body)).not.toContain('original constraint');
+  }
+  expect(
+    textInputs.some((r) =>
+      users(r.body).some((s) =>
+        s.includes('<previous-summary>\nPORTABLE SUMMARY ONE\n</previous-summary>'),
+      ),
+    ),
+  ).toBe(true);
+  const second = resolveCheckpoint(manager.getBranch());
+  expect(second.entry.summary).toBe('PORTABLE SUMMARY TWO');
+  const file = manager.getSessionFile();
+  const forkFile = manager.createBranchedSession(second.entry.id);
+  session.dispose();
+  session = await open(SessionManager.open(forkFile));
+  responses.push({ tokens: 500 });
+  await session.prompt('fork continuation');
+  expect(
+    normalRequests()
+      .at(-1)
+      .body.input.some((i) => i.encrypted_content === 'sealed-2'),
+  ).toBe(true);
+  session.dispose();
+  session = await open(SessionManager.open(file), false);
+  responses.push({ tokens: 500 }, { tokens: 600 });
+  await session.prompt('uninstalled continuation');
+  const absentPayload = normalRequests().at(-1).body;
+  expect(users(absentPayload)).toStrictEqual([
+    anchorText('PORTABLE SUMMARY TWO'),
+    anchorText('PORTABLE SUMMARY ONE'), // The identical real user message is the retained tail.
+    'uninstalled continuation',
+  ]);
+  expect(JSON.stringify(absentPayload)).not.toContain('original constraint');
+  expect(JSON.stringify(absentPayload)).not.toContain('retained tail');
+  expect(JSON.stringify(absentPayload)).not.toContain('sealed-');
+  await session.prompt('native compact tail');
+  const beforeNative = compactions;
+  await session.compact();
+  expect(compactions).toBe(beforeNative);
+  expect(resolveCheckpoint(session.sessionManager.getBranch()).kind).toBe('absent');
+  session.dispose();
+  session = await open(SessionManager.open(file));
+  responses.push({ tokens: 700 });
+  await session.prompt('reenabled');
+  expect(JSON.stringify(normalRequests().at(-1).body)).not.toContain('sealed-');
+  await session.compact();
+  expect(resolveCheckpoint(session.sessionManager.getBranch()).kind).toBe('valid');
+  expect(
+    syntheticRequests()
+      .at(-1)
+      .body.input.some((i) => i.type === 'compaction'),
+  ).toBe(false);
+});
+
+function appendTrackedRead(manager) {
+  manager.appendMessage({
+    role: 'toolResult',
+    toolCallId: 'nested-read',
+    toolName: 'orchestrator',
+    content: [{ type: 'text', text: 'tracked file read' }],
+    isError: false,
+    timestamp: Date.now(),
+    nestedCalls: {
+      complete: true,
+      calls: [
+        {
+          id: 'nested-read/1',
+          name: 'read',
+          arguments: { path: 'old.txt' },
+          status: 'ok',
+          durationMs: 1,
+        },
+      ],
+    },
+  });
+}
+
+test('individual empty, whitespace and invalid text completions reject despite tracked files and abort the sibling', async () => {
+  session = await open(SessionManager.create(root, join(root, 'invalid-text-files')));
+  const manager = session.sessionManager;
+  responses.push({ tokens: 300 }, { tokens: 400 });
+  await session.prompt('file constraint');
+  appendTrackedRead(manager);
+  await session.prompt('file tail');
+  await session.compact();
+  const checkpoint = resolveCheckpoint(manager.getBranch());
+  expect(checkpoint.details.readFiles).toContain('old.txt');
+  responses.push({ tokens: 500 });
+  await session.prompt('live text tail');
+  for (const encrypted of ['good', 'stall']) {
+    wireMode = encrypted;
+    for (const mode of ['empty', 'whitespace', 'length', 'tool', 'error']) {
+      textMode = mode;
+      const requestStart = requests.length;
+      await expect(session.compact()).rejects.toThrow();
+      await Promise.all(requests.slice(requestStart).map((r) => r.closed));
+      expect(preparations.at(-1).isSplitTurn).toBe(false);
+      expect(resolveCheckpoint(manager.getBranch()).entry.id).toBe(checkpoint.entry.id);
+      expect(outcomes.at(-1).aborted).toBe(true);
+      expect(outcomes.at(-1).result).toBeUndefined();
+      expect(toolRuns).toBe(0);
+    }
+  }
+});
+
+test('split-turn history and prefix each require nonempty successful text before merging', async () => {
+  session = await open(SessionManager.create(root, join(root, 'invalid-split-text')));
+  const manager = session.sessionManager;
+  responses.push({ tokens: 300 }, { tokens: 400 });
+  await session.prompt('split original constraint');
+  appendTrackedRead(manager);
+  await session.prompt('split retained tail');
+  await session.compact();
+  const checkpoint = resolveCheckpoint(manager.getBranch());
+  responses.push({ tokens: 500 });
+  await session.prompt('split live request');
+  const assistant = manager
+    .getBranch()
+    .filter((e) => e.type === 'message' && e.message.role === 'assistant')
+    .at(-1).message;
+  manager.appendMessage({
+    ...assistant,
+    content: [{ type: 'text', text: 'retained assistant suffix '.repeat(40) }],
+    timestamp: Date.now(),
+  });
+  for (const part of ['history', 'prefix']) {
+    for (const mode of ['empty', 'whitespace']) {
+      textModes.length = 0;
+      textModes.push(...(part === 'history' ? [mode] : ['good', mode]));
+      wireMode = 'stall';
+      const requestStart = requests.length;
+      await expect(session.compact()).rejects.toThrow();
+      await Promise.all(requests.slice(requestStart).map((r) => r.closed));
+      const preparation = preparations.at(-1);
+      expect(preparation.isSplitTurn).toBe(true);
+      expect(preparation.messagesToSummarize.length).toBeGreaterThan(0);
+      expect(preparation.turnPrefixMessages.length).toBeGreaterThan(0);
+      const textRequests = requests.slice(requestStart).filter((r) => isText(r.body));
+      expect(textRequests).toHaveLength(part === 'history' ? 1 : 2);
+      if (part === 'prefix') expect(users(textRequests[1].body)[0]).toContain('# Conversation');
+      expect(resolveCheckpoint(manager.getBranch()).entry.id).toBe(checkpoint.entry.id);
+      expect(outcomes.at(-1).result).toBeUndefined();
+    }
+  }
+  // With no new history prefix, Pi would otherwise preserve the previous summary
+  // and mask an empty prefix response with its split-turn wrapper.
+  await session.navigateTree(checkpoint.entry.id, { summarize: false });
+  manager.appendMessage({
+    ...assistant,
+    content: [{ type: 'text', text: 'retained suffix '.repeat(40) }],
+    timestamp: Date.now(),
+  });
+  for (const mode of ['empty', 'whitespace']) {
+    textModes.length = 0;
+    textMode = mode;
+    const requestStart = requests.length;
+    await expect(session.compact()).rejects.toThrow();
+    await Promise.all(requests.slice(requestStart).map((r) => r.closed));
+    expect(preparations.at(-1).isSplitTurn).toBe(true);
+    expect(preparations.at(-1).messagesToSummarize).toHaveLength(0);
+    expect(preparations.at(-1).previousSummary).toBe(checkpoint.entry.summary);
+    expect(resolveCheckpoint(manager.getBranch()).entry.id).toBe(checkpoint.entry.id);
+  }
+});
+
+test('explicit portable mode uses text on identity mismatch but rejects corrupt state', async () => {
+  session = await open(SessionManager.create(root, join(root, 'explicit-portable')));
+  responses.push({ tokens: 300 }, { tokens: 400 });
+  await session.prompt('portable A');
+  await session.prompt('portable B');
+  await session.compact();
+  portable = true;
+  identityOverrides = { account: digest('different-account') };
+  responses.push({ tokens: 500 });
+  await session.prompt('explicit portable continuation');
+  expect(JSON.stringify(normalRequests().at(-1).body)).not.toContain('sealed-');
+  const checkpoint = resolveCheckpoint(session.sessionManager.getBranch());
+  checkpoint.entry.summary += 'corruption';
+  const count = requests.length;
+  const tree = await session.navigateTree(session.sessionManager.getBranch()[0].id, {
+    summarize: true,
+  });
+  expect(tree.cancelled).toBe(true);
+  expect(requests).toHaveLength(count);
+  await expect(session.compact()).rejects.toThrow();
+  expect(requests).toHaveLength(count);
+  checkpoint.entry.summary = 'local reply';
+  const before = compactions;
+  await session.compact();
+  expect(compactions).toBe(before);
+  expect(resolveCheckpoint(session.sessionManager.getBranch()).kind).toBe('absent');
+});
+
+test('either dual failure cancels a stalled sibling; parent abort and deadline cancel both', async () => {
+  session = await open(SessionManager.create(root, join(root, 'dual-failures')));
+  responses.push({ tokens: 300 }, { tokens: 400 });
+  await session.prompt('failure A');
+  await session.prompt('failure B');
+  await session.compact();
+  const checkpoint = resolveCheckpoint(session.sessionManager.getBranch());
+  responses.push({ tokens: 500 });
+  await session.prompt('live failure tail');
+  for (const [encrypted, text] of [
+    ['good', 'error'],
+    ['error', 'good'],
+    ['stall', 'error'],
+    ['error', 'stall'],
+  ]) {
+    wireMode = encrypted;
+    textMode = text;
+    const start = Date.now();
+    const requestStart = requests.length;
+    await expect(session.compact()).rejects.toThrow();
+    await Promise.all(requests.slice(requestStart).map((r) => r.closed));
+    expect(Date.now() - start).toBeLessThan(3000);
+    expect(resolveCheckpoint(session.sessionManager.getBranch()).entry.id).toBe(
+      checkpoint.entry.id,
+    );
+  }
+  wireMode = textMode = 'stall';
+  deadlineMs = '1000';
+  const deadlineRequests = requests.length;
+  await expect(session.compact()).rejects.toThrow();
+  await Promise.all(requests.slice(deadlineRequests).map((r) => r.closed));
+  expect(resolveCheckpoint(session.sessionManager.getBranch()).entry.id).toBe(checkpoint.entry.id);
+  deadlineMs = '300000';
+  let received;
+  const ready = new Promise((resolve) => {
+    received = resolve;
+  });
+  onSyntheticReceived = received;
+  const abortRequests = requests.length;
+  const task = session.compact();
+  await ready;
+  session.abortCompaction();
+  await expect(task).rejects.toThrow();
+  await Promise.all(requests.slice(abortRequests).map((r) => r.closed));
+  expect(resolveCheckpoint(session.sessionManager.getBranch()).entry.id).toBe(checkpoint.entry.id);
+});
+
+test('portable preparation carries cumulative hook file lists without reading omitted raw history', async () => {
+  session = await open(SessionManager.create(root, join(root, 'portable-files')));
+  const manager = session.sessionManager;
+  responses.push({ tokens: 300 }, { tokens: 400 });
+  await session.prompt('file history');
+  appendTrackedRead(manager);
+  await session.prompt('file tail');
+  await session.compact();
+  const first = resolveCheckpoint(manager.getBranch());
+  expect(first.details.readFiles).toContain('old.txt');
+  responses.push({ tokens: 500 });
+  await session.prompt('later file work');
+  await session.compact();
+  expect(resolveCheckpoint(manager.getBranch()).details.readFiles).toContain('old.txt');
 });
 
 test('image blocking survives compaction, continuation and reopen', async () => {

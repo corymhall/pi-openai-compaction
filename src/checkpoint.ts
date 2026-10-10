@@ -48,8 +48,15 @@ export interface Coverage {
  */
 export interface Checkpoint {
   type: typeof TYPE;
-  version: 1;
+  version: 2;
+  /** Private replay marker, never the entry's portable summary text. */
   anchor: string;
+  /** Detect changes to the portable contribution before source-local substitution. */
+  summaryHash: string;
+  /** Copy of Pi's portable boundary, independent of encrypted coveredThrough. */
+  firstKeptEntryId: string;
+  readFiles: string[];
+  modifiedFiles: string[];
   identity: Identity;
   coveredThrough: string;
   coverage: Coverage[];
@@ -60,8 +67,9 @@ export type Resolution =
   | { kind: 'absent' }
   | { kind: 'invalid'; reason: string }
   | { kind: 'valid'; entry: CompactionEntry; details: Checkpoint };
+/** Create a replay marker used only by the source-matched compaction contribution. */
 export function newAnchor(): string {
-  return `${WARNING}\nCheckpoint ${randomUUID()}`;
+  return `[pi-openai-compaction replay ${randomUUID()}]`;
 }
 function identityValid(value: unknown): value is Identity {
   return (
@@ -91,15 +99,24 @@ export function resolveCheckpoint(branch: SessionEntry[]): Resolution {
   const d = entry.details;
   if (!ownsCheckpoint(entry)) return { kind: 'absent' };
   const invalid = (reason: string): Resolution => ({ kind: 'invalid', reason });
-  if (!record(d) || d.type !== TYPE || d.version !== 1) {
+  if (!record(d) || d.type !== TYPE || d.version !== 2) {
     return invalid(
       'Unsupported checkpoint/prototype version. Navigate before it or start a new session.',
     );
   }
   if (
     typeof d.anchor !== 'string' ||
-    !d.anchor.startsWith(WARNING) ||
-    d.anchor !== entry.summary ||
+    !/^\[pi-openai-compaction replay [0-9a-f-]+\]$/.test(d.anchor) ||
+    typeof entry.summary !== 'string' ||
+    !entry.summary.trim() ||
+    d.summaryHash !== digest(entry.summary) ||
+    typeof d.firstKeptEntryId !== 'string' ||
+    !d.firstKeptEntryId ||
+    d.firstKeptEntryId !== entry.firstKeptEntryId ||
+    !Array.isArray(d.readFiles) ||
+    !d.readFiles.every((f) => typeof f === 'string') ||
+    !Array.isArray(d.modifiedFiles) ||
+    !d.modifiedFiles.every((f) => typeof f === 'string') ||
     typeof d.coveredThrough !== 'string' ||
     typeof d.responseId !== 'string' ||
     !d.responseId ||
@@ -142,6 +159,9 @@ export function resolveCheckpoint(branch: SessionEntry[]): Resolution {
   }
   const index = branch.findIndex((e) => e.id === entry.id);
   const through = branch.findIndex((e) => e.id === details.coveredThrough);
+  const portableBoundary = branch.findIndex((e) => e.id === details.firstKeptEntryId);
+  if (portableBoundary < 0 || portableBoundary > index)
+    return invalid('Portable summary boundary is missing.');
   if (through < 0 || through >= index) {
     return invalid('Checkpoint coverage boundary is missing.');
   }

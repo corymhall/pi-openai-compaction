@@ -87,12 +87,14 @@ export function effectiveSources(
   const sealed = new Set(
     checkpoint.kind === 'valid' ? checkpoint.details.coverage.map((c) => c.id) : [],
   );
-  return sourceMessages(projection).filter(
-    (s) =>
-      s.message.role !== 'system' &&
-      (!sealed.has(s.sourceId) ||
-        (checkpoint.kind === 'valid' && s.sourceId === checkpoint.entry.id)),
-  );
+  return sourceMessages(projection)
+    .filter(
+      (s) =>
+        s.message.role !== 'system' &&
+        (!sealed.has(s.sourceId) ||
+          (checkpoint.kind === 'valid' && s.sourceId === checkpoint.entry.id)),
+    )
+    .map((s) => ({ ...s, message: replayContribution(s.message, s.sourceId, checkpoint) }));
 }
 /**
  * Remove covered Pi contributions before normal preparation without changing system/tool deltas.
@@ -117,11 +119,24 @@ export function filterContext(
   }
   const sealed = new Set(checkpoint.details.coverage.map((c) => c.id));
   let i = 0;
-  return messages.filter((m) => {
-    if (m.role === 'system') return true;
+  return messages.flatMap((m) => {
+    if (m.role === 'system') return [m];
     const source = sources[i++];
-    return !source || source.sourceId === checkpoint.entry.id || !sealed.has(source.sourceId);
+    return !source || source.sourceId === checkpoint.entry.id || !sealed.has(source.sourceId)
+      ? [replayContribution(m, source?.sourceId, checkpoint)]
+      : [];
   });
+}
+function replayContribution(
+  message: AgentMessage,
+  sourceId: string | undefined,
+  checkpoint: Resolution,
+): AgentMessage {
+  if (checkpoint.kind !== 'valid' || sourceId !== checkpoint.entry.id) return message;
+  if (message.role !== 'compactionSummary' || message.summary !== checkpoint.entry.summary) {
+    fail('Checkpoint summary/source contribution changed.');
+  }
+  return { ...message, summary: checkpoint.details.anchor };
 }
 /** Validate the adapter's ordered user occurrences against Pi source entries before retention. */
 export function classifyWire(
