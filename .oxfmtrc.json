@@ -1,0 +1,10 @@
+{
+  "singleQuote": true,
+  "ignorePatterns": [
+    "lib/**",
+    "coverage/**",
+    "node_modules/**",
+    "package-lock.json",
+    "docs/feasibility/**"
+  ]
+}

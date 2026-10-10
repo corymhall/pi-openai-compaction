@@ -1,0 +1,14 @@
+Portions of src/retention.ts are adapted from OpenAI Codex, commit
+c0c230e6730b3b3c9101b8aff4b9aea4027cea5b, under the Apache License 2.0.
+The adapted files are compact_remote_v2.rs, compact_remote_v2_images.rs,
+context_manager/history.rs and utils/string/src/truncate.rs.
+
+Upstream Codex attribution:
+OpenAI Codex
+Copyright 2025 OpenAI
+
+The upstream NOTICE also attributes its terminal UI derivations to Ratatui:
+Copyright (c) 2016-2022 Florian Dehau
+Copyright (c) 2023-2025 The Ratatui Developers
+MIT license: https://github.com/ratatui/ratatui
+This extension does not adapt the Codex/Ratatui terminal UI.
