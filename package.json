@@ -41,7 +41,13 @@
     "projen": "^0.101.29",
     "ts-jest": "^29.4.12",
     "ts-node": "^10.9.2",
-    "typescript": "^7.0.2"
+    "typescript": "^6.0.0"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "^0.84.1",
+    "@earendil-works/pi-ai": "^0.84.1",
+    "@earendil-works/pi-coding-agent": "^0.84.1",
+    "openai": "^6.26.0"
   },
   "main": "lib/index.js",
   "license": "Apache-2.0",
